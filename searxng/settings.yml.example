@@ -1,0 +1,11 @@
+# Copy to settings.yml, then set a unique secret: openssl rand -hex 32
+# Minimal overrides; merges with SearXNG defaults.
+use_default_settings: true
+server:
+  secret_key: "CHANGE_ME_run_openssl_rand_hex_32"
+  limiter: false          # private/local box: off, or n8n requests get 403'd
+  image_proxy: false
+search:
+  formats:
+    - html
+    - json                # REQUIRED so the JSON API works for n8n

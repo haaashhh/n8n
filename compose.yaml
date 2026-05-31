@@ -1,0 +1,75 @@
+name: n8n-local   # deterministic project name -> volumes: n8n-local_pg_data, n8n-local_n8n_data
+
+volumes:
+  pg_data:
+  n8n_data:
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16   # Postgres 16 + pgvector extension (RAG / embeddings); data-compatible with the prior 16-alpine volume
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pg_data:/var/lib/postgresql/data   # DB stays on internal Docker volume (never on the USB SSD)
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:2.23.1   # pinned; bump deliberately with `docker compose pull`
+    restart: unless-stopped
+    ports:
+      - '127.0.0.1:5678:5678'   # localhost-only: never exposed on the LAN
+    environment:
+      # --- database ---
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: '5432'
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+      # --- core / host ---
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      N8N_HOST: localhost
+      N8N_PORT: '5678'
+      N8N_PROTOCOL: http
+      N8N_SECURE_COOKIE: 'false'        # required to log in over plain http://localhost
+      WEBHOOK_URL: http://localhost:5678/
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE}
+      TZ: ${GENERIC_TIMEZONE}
+      # --- task runners (2.x default; internal mode is correct for a solo local box) ---
+      N8N_RUNNERS_ENABLED: 'true'
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: 'true'
+      # --- storage / pruning ---
+      N8N_DEFAULT_BINARY_DATA_MODE: filesystem   # avoid RAM bloat from in-memory binaries
+      EXECUTIONS_DATA_PRUNE: 'true'
+      EXECUTIONS_DATA_MAX_AGE: '168'             # keep 7 days of execution history
+      EXECUTIONS_DATA_PRUNE_MAX_COUNT: '5000'
+      # --- privacy ---
+      N8N_DIAGNOSTICS_ENABLED: 'false'
+      N8N_VERSION_NOTIFICATIONS_ENABLED: 'false'
+      N8N_PERSONALIZATION_ENABLED: 'false'
+    volumes:
+      - n8n_data:/home/node/.n8n   # holds the encryption key + binaryData (back this up!)
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'   # lets the container reach host Ollama (auto on macOS, needed on Linux)
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Local, private metasearch — gives workflows web search with no API key / no data leaving the box.
+  # Reachable from the n8n container at http://searxng:8080 (same compose network).
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    ports:
+      - '127.0.0.1:8080:8080'   # localhost-only, like the rest of the stack
+    volumes:
+      - ./searxng:/etc/searxng
+    environment:
+      SEARXNG_BASE_URL: http://localhost:8080/
