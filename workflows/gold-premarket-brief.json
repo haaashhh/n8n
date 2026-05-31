@@ -1,0 +1,226 @@
+{
+  "name": "Gold Pre-Market Brief (Claude)",
+  "nodes": [
+    {
+      "id": "schedule-trigger",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [-640, 80],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "30 6 * * 1-5"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "manual-trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [-640, 280],
+      "parameters": {}
+    },
+    {
+      "id": "webhook-trigger",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [-640, 480],
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "goldbrief",
+        "responseMode": "lastNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "searxng",
+      "name": "SearXNG seed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [-360, 280],
+      "parameters": {
+        "method": "GET",
+        "url": "http://searxng:8080/search",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "gold price Fed dollar London Tokyo COMEX forecast"
+            },
+            {
+              "name": "format",
+              "value": "json"
+            },
+            {
+              "name": "time_range",
+              "value": "week"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "build-prompt",
+      "name": "Build Claude prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-120, 280],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const resp = $input.first().json;\nconst results = Array.isArray(resp.results) ? resp.results.slice(0, 10) : [];\nlet news = '';\nresults.forEach((r, i) => {\n  const title = (r.title || 'Untitled').replace(/\\s+/g, ' ').trim();\n  const content = (r.content || '').replace(/\\s+/g, ' ').trim().slice(0, 200);\n  const url = r.url || '';\n  news += `- ${title} :: ${content} (${url})\\n`;\n});\nif (!news) news = '- No local search results were returned; rely on web research and label staleness.\\n';\n\nconst instruction = `You are a senior precious-metals analyst writing a PRE-MARKET GOLD BRIEF to be read before the trading day opens. Use web research (WebSearch / WebFetch) to verify and enrich with the very latest specifics, alongside the curated news at the end.\n\nWrite a COMPLETE, sharp analysis of gold (XAU/USD) across the three major sessions:\n- TOKYO / ASIA (overnight, just traded): what moved, China/Japan/PBoC demand, levels.\n- LONDON / LBMA (about to open): the dollar, real yields, ETF flows, European drivers.\n- NEW YORK / COMEX (US session ahead): Fed/rate expectations, US data on today's calendar, COMEX positioning.\n\nAlso include: an Executive Take (one tight paragraph — likely tone at the open and why), Key Levels (support/resistance with numbers where possible), Today's Catalysts (scheduled data/events, central-bank speakers, geopolitics), and a Risk note. Be specific and quantitative where the data allows; clearly label anything uncertain or stale. Cite sources inline as [n] with a short numbered Sources list at the end.\n\nOUTPUT — CRITICAL: return ONLY one complete, self-contained HTML document — a polished, print-ready report with clean professional inline CSS (a titled header with today's date, clear section headings, readable serif/sans typography, a subtle gold accent, and a small footer \"Generated locally · Claude analysis\"). No commentary, no markdown, no code fences. Start with <!doctype html> and end with </html>.`;\n\nconst prompt = `${instruction}\\n\\nCURATED NEWS (local):\\n${news}`;\nreturn [{ json: { prompt, allowedTools: 'WebSearch WebFetch' } }];"
+      }
+    },
+    {
+      "id": "claude-bridge",
+      "name": "Claude (bridge)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [120, 280],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8787/query",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ prompt: $json.prompt, allowedTools: $json.allowedTools }) }}",
+        "options": {
+          "timeout": 600000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "Mqqr8NFaiX2JLH30",
+          "name": "Claude Bridge"
+        }
+      }
+    },
+    {
+      "id": "extract-html",
+      "name": "Extract HTML",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [360, 280],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "let raw = '';\nconst j = $input.first().json;\nif (j && typeof j.result === 'string') raw = j.result;\nelse if (j && j.result != null) raw = String(j.result);\nelse if (typeof j === 'string') raw = j;\n\nlet html = String(raw || '').trim();\nhtml = html.replace(/^```html\\s*/i, '').replace(/^```\\s*/, '').replace(/```\\s*$/, '').trim();\n\nif (!html) {\n  html = '<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Gold Pre-Market Brief</title>' +\n    '<style>@page{margin:28mm 20mm;}body{font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;color:#1a1a1a;line-height:1.55;font-size:12pt;}h1{color:#9a7b1f;}.note{border-left:4px solid #c9a227;padding:10px 16px;background:#fdf8e8;}</style>' +\n    '</head><body><h1>Gold Pre-Market Brief</h1><div class=\"note\"><p><strong>Claude bridge not reachable — enable it (see docs/BUILD-REPORT.md §6).</strong></p>' +\n    '<p>The local SearXNG news was gathered, but the Claude host bridge returned no analysis. Start the bridge and re-run.</p></div></body></html>';\n}\n\nreturn [{ json: { html } }];"
+      }
+    },
+    {
+      "id": "convert-to-file",
+      "name": "Convert to File",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [600, 280],
+      "parameters": {
+        "operation": "toText",
+        "sourceProperty": "html",
+        "binaryPropertyName": "index",
+        "options": {
+          "fileName": "index.html"
+        }
+      }
+    },
+    {
+      "id": "gotenberg",
+      "name": "Gotenberg HTML to PDF",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [840, 280],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "http://gotenberg:3000/forms/chromium/convert/html",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "files",
+              "inputDataFieldName": "index"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 120000,
+          "response": {
+            "response": {
+              "responseFormat": "file",
+              "outputPropertyName": "data"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "telegram-send",
+      "name": "Telegram sendDocument",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [1080, 280],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "resource": "message",
+        "operation": "sendDocument",
+        "chatId": "1816786906",
+        "binaryData": true,
+        "binaryPropertyName": "data",
+        "additionalFields": {
+          "caption": "=📊 Gold Pre-Market Brief — {{ $now.toISODate() }}"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "DBYRKqKOi8hDiJvp",
+          "name": "Telegram bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [[{ "node": "SearXNG seed", "type": "main", "index": 0 }]]
+    },
+    "Manual Trigger": {
+      "main": [[{ "node": "SearXNG seed", "type": "main", "index": 0 }]]
+    },
+    "Webhook": {
+      "main": [[{ "node": "SearXNG seed", "type": "main", "index": 0 }]]
+    },
+    "SearXNG seed": {
+      "main": [[{ "node": "Build Claude prompt", "type": "main", "index": 0 }]]
+    },
+    "Build Claude prompt": {
+      "main": [[{ "node": "Claude (bridge)", "type": "main", "index": 0 }]]
+    },
+    "Claude (bridge)": {
+      "main": [[{ "node": "Extract HTML", "type": "main", "index": 0 }]]
+    },
+    "Extract HTML": {
+      "main": [[{ "node": "Convert to File", "type": "main", "index": 0 }]]
+    },
+    "Convert to File": {
+      "main": [[{ "node": "Gotenberg HTML to PDF", "type": "main", "index": 0 }]]
+    },
+    "Gotenberg HTML to PDF": {
+      "main": [[{ "node": "Telegram sendDocument", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
