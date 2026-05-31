@@ -1,0 +1,311 @@
+{
+  "name": "Client Proposal -> PDF -> Telegram",
+  "nodes": [
+    {
+      "id": "manual_trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -400,
+        200
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "ewf_trigger",
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -400,
+        400
+      ],
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "clientName",
+              "type": "string"
+            },
+            {
+              "name": "projectType",
+              "type": "string"
+            },
+            {
+              "name": "scopeNotes",
+              "type": "string"
+            },
+            {
+              "name": "budget",
+              "type": "string"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "webhook_trigger",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -400,
+        600
+      ],
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "proposal",
+        "responseMode": "lastNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "collect_inputs",
+      "name": "Collect Inputs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -160,
+        400
+      ],
+      "parameters": {
+        "jsCode": "// Normalize inputs from Manual / ExecuteWorkflow / Webhook triggers into one shape.\nconst src = $json || {};\nconst q = (src.query && typeof src.query === 'object') ? src.query : {};\nconst body = (src.body && typeof src.body === 'object') ? src.body : {};\nconst pick = (k, dflt) => {\n  const v = src[k] ?? q[k] ?? body[k];\n  return (v === undefined || v === null || v === '') ? dflt : String(v);\n};\nconst clientName = pick('clientName', 'Acme GmbH');\nconst projectType = pick('projectType', 'Web application development');\nconst scopeNotes = pick('scopeNotes', 'Build a modern, responsive web application with user authentication, a dashboard, and reporting.');\nconst budget = pick('budget', '[PLACEHOLDER: budget not provided]');\nreturn [{ json: { clientName, projectType, scopeNotes, budget } }];"
+      }
+    },
+    {
+      "id": "build_prompt",
+      "name": "Build Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        80,
+        400
+      ],
+      "parameters": {
+        "jsCode": "const { clientName, projectType, scopeNotes, budget } = $json;\nconst system = `You are Vera, the client concierge for a solo software agency based in Berlin. You write all client-facing communication. Voice: warm, calm, professional, concrete. Plain language — never jargon, never hype. At most one exclamation mark per message. Every message ends with exactly one clear next step or question. Mirror the client's language (German or English) and formality; in German default to \"Sie\" unless the client used \"du\". Never invent prices, deadlines, scope, or commitments — if a fact is missing, insert a literal [PLACEHOLDER: what's needed] and flag it. Never apologize more than once. Sign off as the agency owner, not as an AI. Output only the message body unless asked otherwise.`;\n\nconst task = `Draft a professional project proposal for the client below. Write in clear English prose suitable for a polished PDF document.\n\nClient: ${clientName}\nProject type: ${projectType}\nScope notes: ${scopeNotes}\nBudget: ${budget}\n\nProduce EXACTLY these six sections, each prefixed with its heading on its own line in this exact format \"## <Section Name>\":\n## Overview\n## Scope & Deliverables\n## Approach\n## Timeline\n## Investment\n## Next Steps\n\nRules:\n- Overview: 2-3 sentences framing the engagement and the value to ${clientName}.\n- Scope & Deliverables: a bulleted list (use \"- \" prefixes) of concrete deliverables derived from the scope notes.\n- Approach: 2-4 sentences on methodology / how you'll work.\n- Timeline: describe phases and rough durations as bullet points (use \"- \" prefixes). Do not invent exact calendar dates.\n- Investment: reference the budget. If budget is a placeholder, keep the literal [PLACEHOLDER: ...] text. Do not invent numbers.\n- Next Steps: exactly one clear call to action.\nDo not add any text before \"## Overview\" or after the Next Steps section.`;\n\nreturn [{ json: { model: 'qwen3:8b', prompt: system + '\\n\\n' + task, clientName, projectType, scopeNotes, budget } }];"
+      }
+    },
+    {
+      "id": "llm",
+      "name": "LLM (qwen3:8b)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        320,
+        400
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $json.model, prompt: $json.prompt, stream:false, think:false, options:{ num_ctx:8192, temperature:0.3 } }) }}",
+        "options": {
+          "timeout": 300000
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3
+    },
+    {
+      "id": "build_html",
+      "name": "Build HTML",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        560,
+        400
+      ],
+      "parameters": {
+        "jsCode": "// Inputs: LLM response in $json.response. Original client vars from the Build Prompt node.\nconst raw = ($json.response || '').toString();\nconst vars = $('Build Prompt').first().json;\nconst clientName = vars.clientName || 'Client';\nconst budget = vars.budget || '';\n\n// Strip any <think> blocks just in case.\nlet text = raw.replace(/<think>[\\s\\S]*?<\\/think>/gi, '').trim();\n\nconst esc = (s) => String(s)\n  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\n\n// Split the LLM output into the six sections by '## Heading'.\nfunction sectionBody(name) {\n  const re = new RegExp('##\\\\s*' + name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&') + '\\\\s*([\\\\s\\\\S]*?)(?=\\\\n##\\\\s|$)', 'i');\n  const m = text.match(re);\n  return m ? m[1].trim() : '';\n}\n\n// Convert a chunk that may contain '- ' bullet lines into HTML (ul) or paragraphs.\nfunction toHtml(chunk) {\n  if (!chunk) return '<p class=\"muted\">[PLACEHOLDER: content not generated]</p>';\n  const lines = chunk.split(/\\n+/).map(l => l.trim()).filter(Boolean);\n  const bullets = lines.filter(l => /^[-*•]\\s+/.test(l));\n  if (bullets.length && bullets.length >= lines.length - 1) {\n    const items = lines.map(l => '<li>' + esc(l.replace(/^[-*•]\\s+/, '')) + '</li>').join('');\n    return '<ul>' + items + '</ul>';\n  }\n  return lines.map(l => '<p>' + esc(l) + '</p>').join('');\n}\n\nconst overview   = sectionBody('Overview');\nconst scope      = sectionBody('Scope & Deliverables') || sectionBody('Scope and Deliverables') || sectionBody('Scope of Work');\nconst approach   = sectionBody('Approach');\nconst timeline   = sectionBody('Timeline');\nconst investment = sectionBody('Investment');\nconst nextSteps  = sectionBody('Next Steps');\n\nconst dateStr = new Date().toLocaleDateString('en-GB', { year: 'numeric', month: 'long', day: 'numeric' });\n\nconst html = `<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n<style>\n  :root{\n    --brand:#1F3A5F; --accent:#3E7CB1; --ink:#1A1A1A; --muted:#6B7280;\n    --line:#E5E7EB; --bg-soft:#F7F9FC; --font:'Helvetica Neue',Arial,sans-serif;\n  }\n  @page{ size:A4; margin:18mm 16mm; }\n  *{ box-sizing:border-box; -webkit-print-color-adjust:exact; print-color-adjust:exact; }\n  body{ font-family:var(--font); color:var(--ink); font-size:11pt; line-height:1.5; margin:0; }\n  h1{ color:var(--brand); font-size:22pt; margin:0 0 4px; }\n  h2{ color:var(--brand); font-size:13pt; border-bottom:2px solid var(--accent);\n      padding-bottom:4px; margin:24px 0 10px; }\n  .muted{ color:var(--muted); } .right{ text-align:right; } .small{ font-size:9pt; }\n  .brandbar{ height:6px; background:linear-gradient(90deg,var(--brand),var(--accent)); }\n  ul{ margin:8px 0; padding-left:20px; } li{ margin:4px 0; }\n  p{ margin:8px 0; }\n</style>\n</head>\n<body>\n<div class=\"brandbar\"></div>\n<div style=\"margin-top:60px;text-align:center\">\n  <h1 style=\"font-size:30pt;margin-top:30px\">Project Proposal</h1>\n  <p class=\"muted\">Prepared for ${esc(clientName)} · ${esc(dateStr)}</p>\n</div>\n<div style=\"page-break-after:always\"></div>\n<h2>1. Overview</h2>\n${toHtml(overview)}\n<h2>2. Scope &amp; Deliverables</h2>\n${toHtml(scope)}\n<h2>3. Approach</h2>\n${toHtml(approach)}\n<h2>4. Timeline</h2>\n${toHtml(timeline)}\n<h2>5. Investment</h2>\n${toHtml(investment)}\n<h2>6. Next Steps</h2>\n${toHtml(nextSteps)}\n<div class=\"small muted\" style=\"margin-top:40px\">Berlin Software Agency · hello@agency.example · agency.example</div>\n</body>\n</html>`;\n\nreturn [{ json: { html, clientName } }];"
+      }
+    },
+    {
+      "id": "to_file",
+      "name": "Convert to File",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        800,
+        400
+      ],
+      "parameters": {
+        "operation": "toText",
+        "sourceProperty": "html",
+        "binaryPropertyName": "index",
+        "options": {
+          "fileName": "index.html"
+        }
+      }
+    },
+    {
+      "id": "gotenberg",
+      "name": "Gotenberg HTML to PDF",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1040,
+        400
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://gotenberg:3000/forms/chromium/convert/html",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "files",
+              "inputDataFieldName": "index"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file",
+              "outputPropertyName": "data"
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3
+    },
+    {
+      "id": "telegram_doc",
+      "name": "Telegram Send Document",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1280,
+        400
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "sendDocument",
+        "chatId": "1816786906",
+        "binaryData": true,
+        "binaryPropertyName": "data",
+        "additionalFields": {
+          "caption": "=Proposal: {{ $('Build HTML').first().json.clientName }}",
+          "fileName": "proposal.pdf"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "DBYRKqKOi8hDiJvp",
+          "name": "Telegram bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Collect Inputs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Workflow Trigger": {
+      "main": [
+        [
+          {
+            "node": "Collect Inputs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Collect Inputs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect Inputs": {
+      "main": [
+        [
+          {
+            "node": "Build Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Prompt": {
+      "main": [
+        [
+          {
+            "node": "LLM (qwen3:8b)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM (qwen3:8b)": {
+      "main": [
+        [
+          {
+            "node": "Build HTML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build HTML": {
+      "main": [
+        [
+          {
+            "node": "Convert to File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert to File": {
+      "main": [
+        [
+          {
+            "node": "Gotenberg HTML to PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gotenberg HTML to PDF": {
+      "main": [
+        [
+          {
+            "node": "Telegram Send Document",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

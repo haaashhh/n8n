@@ -1,0 +1,629 @@
+{
+  "name": "Telegram Command Center",
+  "nodes": [
+    {
+      "id": "telegram_trigger",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -400,
+        0
+      ],
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "DBYRKqKOi8hDiJvp",
+          "name": "Telegram bot"
+        }
+      }
+    },
+    {
+      "id": "webhook_command",
+      "name": "Webhook Command",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -400,
+        220
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "command",
+        "responseMode": "lastNode",
+        "responseData": "firstEntryJson"
+      }
+    },
+    {
+      "id": "normalize_input",
+      "name": "Normalize Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -160,
+        100
+      ],
+      "parameters": {
+        "jsCode": "// Normalize both the Telegram Trigger and the test Webhook into one shape.\nconst item = $input.first().json;\nlet text = '';\nlet chatId = '';\nlet source = 'unknown';\n\nif (item.message && item.message.chat) {\n  // Telegram Trigger update\n  source = 'telegram';\n  text = item.message.text || item.message.caption || '';\n  chatId = String(item.message.chat.id);\n} else if (item.body) {\n  // Test webhook POST { text: \"...\", chatId?: \"...\" }\n  source = 'webhook';\n  text = item.body.text || '';\n  chatId = String(item.body.chatId || '1816786906');\n} else {\n  text = item.text || '';\n  chatId = String(item.chatId || '');\n}\n\nreturn [{ json: { text: String(text).trim(), chatId, source } }];"
+      }
+    },
+    {
+      "id": "if_whitelist",
+      "name": "Whitelist Owner",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        80,
+        100
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.chatId }}",
+              "rightValue": "1816786906",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "build_classify_prompt",
+      "name": "Build Classify Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        320,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const text = $json.text || '';\nconst chatId = $json.chatId;\nconst system = `You are Cosmo, chief of staff to a solo software-agency founder (Europe/Berlin). You operate inside Telegram, so be extremely concise and mobile-readable: lead with the answer or the action, no preamble, no sign-off. Use short bullets. Surface only what matters; suppress noise. Times are Europe/Berlin. Before any irreversible or external action (sending a client message, issuing an invoice, deleting), summarize the action in one line and ask \"Confirm? (yes/no)\". When routing a command, pick exactly one destination and state it. Never be chatty.`;\nconst task = `Classify the user's Telegram command into exactly ONE intent and extract arguments.\\nValid intents: research, proposal, invoice, onboard, brief, chat.\\n- research: web/market/competitor research or fact-check requests.\\n- proposal: write a client proposal, quote, or SOW.\\n- invoice: create/send an invoice or payment reminder.\\n- onboard: onboard a new client / intake-to-welcome.\\n- brief: the morning daily brief / standup / digest.\\n- chat: anything else, greetings, status questions, small talk.\\nReturn ONLY minified JSON, no markdown, no prose, exactly: {\\\"intent\\\":\\\"<one of the six>\\\",\\\"args\\\":\\\"<the remaining user request as a string, or empty>\\\"}\\n\\nUSER MESSAGE:\\n${text}`;\nreturn { json: { model: 'qwen3:8b', prompt: `${system}\\n\\n${task}`, text, chatId } };"
+      }
+    },
+    {
+      "id": "llm_classify",
+      "name": "LLM Classify",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        560,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/generate",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $json.model, prompt: $json.prompt, stream:false, think:false, options:{ num_ctx:8192, temperature:0.1 } }) }}",
+        "options": {
+          "timeout": 300000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3
+    },
+    {
+      "id": "parse_intent",
+      "name": "Parse Intent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const raw = ($json.response || '').toString();\nconst text = $('Build Classify Prompt').item.json.text;\nconst chatId = $('Build Classify Prompt').item.json.chatId;\nconst valid = ['research','proposal','invoice','onboard','brief','chat'];\nlet intent = 'chat';\nlet args = text;\nconst m = raw.match(/\\{[\\s\\S]*\\}/);\nif (m) {\n  try {\n    const o = JSON.parse(m[0]);\n    if (o.intent && valid.includes(String(o.intent).toLowerCase())) intent = String(o.intent).toLowerCase();\n    if (typeof o.args === 'string' && o.args.length) args = o.args;\n  } catch (e) { /* fall back to chat */ }\n}\nreturn { json: { intent, args, text, chatId } };"
+      }
+    },
+    {
+      "id": "switch_intent",
+      "name": "Switch Intent",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        1040,
+        0
+      ],
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "r1",
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "research",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "research"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "r2",
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "proposal",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "proposal"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "r3",
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "invoice",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "invoice"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "r4",
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "onboard",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "onboard"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "r5",
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "brief",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "brief"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "chat"
+        }
+      }
+    },
+    {
+      "id": "exec_research",
+      "name": "Run Research Workflow",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        1300,
+        -260
+      ],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "",
+          "cachedResultName": "TODO: wire Research workflow id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "mode": "once"
+      }
+    },
+    {
+      "id": "exec_proposal",
+      "name": "Run Proposal Workflow",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        1300,
+        -130
+      ],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "",
+          "cachedResultName": "TODO: wire Proposal workflow id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "mode": "once"
+      }
+    },
+    {
+      "id": "exec_invoice",
+      "name": "Run Invoice Workflow",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        1300,
+        0
+      ],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "",
+          "cachedResultName": "TODO: wire Invoice workflow id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "mode": "once"
+      }
+    },
+    {
+      "id": "exec_onboard",
+      "name": "Run Onboard Workflow",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        1300,
+        130
+      ],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "",
+          "cachedResultName": "TODO: wire Onboard workflow id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "mode": "once"
+      }
+    },
+    {
+      "id": "exec_brief",
+      "name": "Run Brief Workflow",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        1300,
+        260
+      ],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "",
+          "cachedResultName": "TODO: wire Brief workflow id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "mode": "once"
+      }
+    },
+    {
+      "id": "build_chat_prompt",
+      "name": "Build Chat Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1300,
+        420
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const text = $json.text || '';\nconst chatId = $json.chatId;\nconst system = `You are Cosmo, chief of staff to a solo software-agency founder (Europe/Berlin). You operate inside Telegram, so be extremely concise and mobile-readable: lead with the answer or the action, no preamble, no sign-off. Use short bullets. Surface only what matters; suppress noise. Times are Europe/Berlin. Before any irreversible or external action (sending a client message, issuing an invoice, deleting), summarize the action in one line and ask \"Confirm? (yes/no)\". When routing a command, pick exactly one destination and state it. Never be chatty.`;\nconst task = `Reply to this Telegram message from the founder. If it is a greeting or status check, answer briefly and list what you can route: research, proposal, invoice, onboard, brief.\\n\\nMESSAGE:\\n${text}`;\nreturn { json: { model: 'qwen3:8b', prompt: `${system}\\n\\n${task}`, chatId } };"
+      }
+    },
+    {
+      "id": "llm_chat",
+      "name": "LLM Chat Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1540,
+        420
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/generate",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $json.model, prompt: $json.prompt, stream:false, think:false, options:{ num_ctx:8192, temperature:0.3 } }) }}",
+        "options": {
+          "timeout": 300000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3
+    },
+    {
+      "id": "telegram_reply",
+      "name": "Telegram Reply",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1780,
+        420
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "1816786906",
+        "text": "={{ $json.response.slice(0,4000) }}",
+        "additionalFields": {}
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "DBYRKqKOi8hDiJvp",
+          "name": "Telegram bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Normalize Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook Command": {
+      "main": [
+        [
+          {
+            "node": "Normalize Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Input": {
+      "main": [
+        [
+          {
+            "node": "Whitelist Owner",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Whitelist Owner": {
+      "main": [
+        [
+          {
+            "node": "Build Classify Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Build Classify Prompt": {
+      "main": [
+        [
+          {
+            "node": "LLM Classify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Classify": {
+      "main": [
+        [
+          {
+            "node": "Parse Intent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Intent": {
+      "main": [
+        [
+          {
+            "node": "Switch Intent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch Intent": {
+      "main": [
+        [
+          {
+            "node": "Run Research Workflow",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Run Proposal Workflow",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Run Invoice Workflow",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Run Onboard Workflow",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Run Brief Workflow",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Chat Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Chat Prompt": {
+      "main": [
+        [
+          {
+            "node": "LLM Chat Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Chat Reply": {
+      "main": [
+        [
+          {
+            "node": "Telegram Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

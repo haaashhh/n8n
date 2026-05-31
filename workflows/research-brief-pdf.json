@@ -1,0 +1,307 @@
+{
+  "name": "Research Brief -> PDF -> Telegram (Mira)",
+  "nodes": [
+    {
+      "id": "manual-trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -640,
+        200
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "webhook-trigger",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -640,
+        420
+      ],
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "research",
+        "responseMode": "lastNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "read-topic",
+      "name": "Read Topic",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -400,
+        300
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const incoming = $input.first().json;\nconst topic = (incoming && incoming.query && incoming.query.topic) ? String(incoming.query.topic).trim() : 'AI agents for small businesses';\nreturn [{ json: { topic } }];"
+      }
+    },
+    {
+      "id": "searxng",
+      "name": "SearXNG Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -160,
+        300
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "http://searxng:8080/search",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "={{ $json.topic }}"
+            },
+            {
+              "name": "format",
+              "value": "json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "build-prompt",
+      "name": "Build Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        80,
+        300
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const topic = $('Read Topic').first().json.topic;\nconst resp = $input.first().json;\nconst results = Array.isArray(resp.results) ? resp.results.slice(0, 8) : [];\nlet sourcesBlock = '';\nresults.forEach((r, i) => {\n  const title = (r.title || 'Untitled').replace(/\\s+/g, ' ').trim();\n  const url = r.url || '';\n  const content = (r.content || '').replace(/\\s+/g, ' ').trim().slice(0, 400);\n  sourcesBlock += `[${i + 1}] ${title}\\nURL: ${url}\\nSnippet: ${content}\\n\\n`;\n});\nif (!sourcesBlock) sourcesBlock = 'No search results were returned. Note this explicitly and write from general knowledge while labeling it as Unknown/Inference.';\n\nconst system = `You are Mira, a research analyst. You are rigorous, neutral, and never speculate without labeling it. Work only from the provided search results / retrieved documents. For every factual claim include a [source: URL or doc title]. Explicitly separate Facts (in sources), Inference (your reasoning), and Unknown (not in sources — say so). State a confidence level (high/medium/low) for conclusions. Never invent a source or a statistic. Prefer recent sources and note publication dates. Output structured markdown: a 2-line summary, then findings as bullets, then a Sources list.`;\n\nconst task = `Write a structured markdown research brief on the topic: \"${topic}\".\\n\\nUse ONLY the numbered search results below. Cite claims inline with bracketed numbers like [1], [2] that map to the Sources list.\\n\\nProduce EXACTLY this structure:\\n# Research Brief: ${topic}\\nA two-line neutral overview of the topic.\\n\\n## Key Points\\n- Bullet points of the most important findings, each with an inline [n] citation.\\n\\n## Outlook\\n- 2-4 bullets on where this is heading, labeling Inference vs Fact.\\n\\n## Sources\\nA numbered list [n] mapping each number to its title and URL.\\n\\nSEARCH RESULTS:\\n${sourcesBlock}`;\n\nconst prompt = `${system}\\n\\n${task}`;\nreturn [{ json: { model: 'qwen3:8b', prompt, topic } }];"
+      }
+    },
+    {
+      "id": "llm",
+      "name": "LLM (Ollama)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        320,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/generate",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $json.model, prompt: $json.prompt, stream:false, think:false, options:{ num_ctx:8192, temperature:0.3 } }) }}",
+        "options": {
+          "timeout": 300000
+        }
+      }
+    },
+    {
+      "id": "build-html",
+      "name": "Build HTML",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        560,
+        300
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const md = String($input.first().json.response || '').trim();\nconst topic = $('Build Prompt').first().json.topic;\n\nfunction esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}\n\nfunction renderInline(text){\n  let t = esc(text);\n  t = t.replace(/\\[(\\d+)\\]/g, '<sup class=\"cite\">[$1]</sup>');\n  t = t.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');\n  t = t.replace(/\\*([^*]+)\\*/g, '<em>$1</em>');\n  t = t.replace(/\\[([^\\]]+)\\]\\((https?:[^)]+)\\)/g, '<a href=\"$2\">$1</a>');\n  t = t.replace(/(https?:\\/\\/[^\\s<]+)/g, '<a href=\"$1\">$1</a>');\n  return t;\n}\n\nconst lines = md.split(/\\r?\\n/);\nlet html = '';\nlet inList = false;\nfunction closeList(){ if(inList){ html += '</ul>'; inList = false; } }\nfor (const raw of lines){\n  const line = raw.trimEnd();\n  if (!line.trim()){ closeList(); continue; }\n  let m;\n  if ((m = line.match(/^#\\s+(.*)/))){ closeList(); html += '<h1>' + renderInline(m[1]) + '</h1>'; }\n  else if ((m = line.match(/^##\\s+(.*)/))){ closeList(); html += '<h2>' + renderInline(m[1]) + '</h2>'; }\n  else if ((m = line.match(/^###\\s+(.*)/))){ closeList(); html += '<h3>' + renderInline(m[1]) + '</h3>'; }\n  else if ((m = line.match(/^[-*]\\s+(.*)/))){ if(!inList){ html += '<ul>'; inList = true; } html += '<li>' + renderInline(m[1]) + '</li>'; }\n  else if ((m = line.match(/^\\d+\\.\\s+(.*)/))){ if(!inList){ html += '<ul>'; inList = true; } html += '<li>' + renderInline(m[1]) + '</li>'; }\n  else { closeList(); html += '<p>' + renderInline(line) + '</p>'; }\n}\ncloseList();\n\nconst now = new Date().toISOString().slice(0,10);\nconst doc = `<!DOCTYPE html>\\n<html lang=\"en\"><head><meta charset=\"utf-8\"><title>Research Brief: ${esc(topic)}</title>\\n<style>\\n@page { margin: 28mm 20mm; }\\nbody { font-family: -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; color: #1a1a1a; line-height: 1.55; font-size: 12pt; }\\n.header { border-bottom: 3px solid #2b6cb0; padding-bottom: 10px; margin-bottom: 24px; }\\n.header .kicker { color: #2b6cb0; font-size: 10pt; letter-spacing: 1.5px; text-transform: uppercase; font-weight: 600; }\\n.header .date { color: #718096; font-size: 10pt; margin-top: 4px; }\\nh1 { font-size: 20pt; color: #1a202c; margin: 0 0 6px; }\\nh2 { font-size: 14pt; color: #2b6cb0; margin: 22px 0 8px; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; }\\nh3 { font-size: 12pt; color: #2d3748; margin: 16px 0 6px; }\\np { margin: 8px 0; }\\nul { margin: 8px 0 8px 4px; padding-left: 22px; }\\nli { margin: 5px 0; }\\nsup.cite { color: #2b6cb0; font-weight: 600; }\\na { color: #2b6cb0; word-break: break-all; }\\n.footer { margin-top: 32px; padding-top: 10px; border-top: 1px solid #e2e8f0; color: #a0aec0; font-size: 9pt; }\\n</style></head>\\n<body>\\n<div class=\"header\"><div class=\"kicker\">Research Brief - by Mira</div><div class=\"date\">${now}</div></div>\\n${html}\\n<div class=\"footer\">Generated locally via Ollama (qwen3:8b) + SearXNG. Verify sources before relying on figures.</div>\\n</body></html>`;\n\nreturn [{ json: { html: doc, topic } }];"
+      }
+    },
+    {
+      "id": "convert-to-file",
+      "name": "Convert to File",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        800,
+        300
+      ],
+      "parameters": {
+        "operation": "toText",
+        "sourceProperty": "html",
+        "binaryPropertyName": "index",
+        "options": {
+          "fileName": "index.html"
+        }
+      }
+    },
+    {
+      "id": "gotenberg",
+      "name": "Gotenberg HTML to PDF",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1040,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://gotenberg:3000/forms/chromium/convert/html",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "files",
+              "inputDataFieldName": "index"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 120000,
+          "response": {
+            "response": {
+              "responseFormat": "file",
+              "outputPropertyName": "data"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "telegram-send",
+      "name": "Telegram sendDocument",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1280,
+        300
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "sendDocument",
+        "chatId": "1816786906",
+        "binaryData": true,
+        "binaryPropertyName": "data",
+        "additionalFields": {
+          "caption": "=Research brief: {{ $('Build HTML').first().json.topic }}"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "DBYRKqKOi8hDiJvp",
+          "name": "Telegram bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read Topic",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Read Topic",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Topic": {
+      "main": [
+        [
+          {
+            "node": "SearXNG Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SearXNG Search": {
+      "main": [
+        [
+          {
+            "node": "Build Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Prompt": {
+      "main": [
+        [
+          {
+            "node": "LLM (Ollama)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM (Ollama)": {
+      "main": [
+        [
+          {
+            "node": "Build HTML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build HTML": {
+      "main": [
+        [
+          {
+            "node": "Convert to File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert to File": {
+      "main": [
+        [
+          {
+            "node": "Gotenberg HTML to PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gotenberg HTML to PDF": {
+      "main": [
+        [
+          {
+            "node": "Telegram sendDocument",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

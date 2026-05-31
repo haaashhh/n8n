@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root{
+    --brand:#1F3A5F; --accent:#3E7CB1; --ink:#1A1A1A; --muted:#6B7280;
+    --line:#E5E7EB; --bg-soft:#F7F9FC; --font:'Helvetica Neue',Arial,sans-serif;
+  }
+  @page{ size:A4; margin:18mm 16mm; }
+  *{ box-sizing:border-box; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  body{ font-family:var(--font); color:var(--ink); font-size:11pt; line-height:1.5; margin:0; }
+  h1{ color:var(--brand); font-size:22pt; margin:0 0 4px; }
+  h2{ color:var(--brand); font-size:13pt; border-bottom:2px solid var(--accent);
+      padding-bottom:4px; margin:24px 0 10px; }
+  .muted{ color:var(--muted); } .small{ font-size:9pt; }
+  .brandbar{ height:6px; background:linear-gradient(90deg,var(--brand),var(--accent)); }
+  table{ width:100%; border-collapse:collapse; margin:8px 0; }
+  td{ padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  tr:nth-child(even) td{ background:var(--bg-soft); }
+  .logo{ height:40px; }
+</style>
+</head>
+<body>
+<div class="brandbar"></div>
+<div style="margin-top:50px">
+  <img class="logo" src="data:image/png;base64,{{LOGO_B64}}" alt="{{AGENCY_NAME}}">
+  <h1>Welcome aboard, {{CLIENT_FIRST_NAME}}</h1>
+  <p class="muted">Your onboarding guide with {{AGENCY_NAME}}</p>
+</div>
+<h2>What happens next</h2>
+{{STEPS_LIST}}
+<h2>Your project at a glance</h2>
+<table>
+  <tbody>
+    <tr><td><strong>Project</strong></td><td>{{PROJECT_NAME}}</td></tr>
+    <tr><td><strong>Main contact</strong></td><td>{{CONTACT_NAME}} — {{CONTACT_EMAIL}}</td></tr>
+    <tr><td><strong>Kickoff</strong></td><td>{{KICKOFF_DATE}}</td></tr>
+    <tr><td><strong>Tools we'll use</strong></td><td>{{TOOLS}}</td></tr>
+  </tbody>
+</table>
+<h2>What we need from you</h2>
+{{CHECKLIST}}
+<h2>How we communicate</h2>
+<p>{{COMMS_POLICY}}</p>
+<div class="small muted" style="margin-top:30px">Questions? {{AGENCY_EMAIL}}</div>
+</body>
+</html>

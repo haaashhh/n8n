@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root{
+    --brand:#1F3A5F; --accent:#3E7CB1; --ink:#1A1A1A; --muted:#6B7280;
+    --line:#E5E7EB; --bg-soft:#F7F9FC; --font:'Helvetica Neue',Arial,sans-serif;
+  }
+  @page{ size:A4; margin:18mm 16mm; }
+  *{ box-sizing:border-box; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  body{ font-family:var(--font); color:var(--ink); font-size:11pt; line-height:1.5; margin:0; }
+  h1{ color:var(--brand); font-size:22pt; margin:0 0 4px; }
+  h2{ color:var(--brand); font-size:13pt; border-bottom:2px solid var(--accent);
+      padding-bottom:4px; margin:24px 0 10px; }
+  .muted{ color:var(--muted); } .right{ text-align:right; } .small{ font-size:9pt; }
+  .brandbar{ height:6px; background:linear-gradient(90deg,var(--brand),var(--accent)); }
+  table{ width:100%; border-collapse:collapse; margin:8px 0; }
+  th{ background:var(--brand); color:#fff; text-align:left; padding:8px 10px; font-size:9.5pt;
+      text-transform:uppercase; letter-spacing:.04em; }
+  td{ padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  tr:nth-child(even) td{ background:var(--bg-soft); }
+  .totals td{ border:none; padding:4px 10px; }
+  .totals .grand{ font-size:13pt; font-weight:700; color:var(--brand);
+      border-top:2px solid var(--brand); }
+  .badge{ display:inline-block; background:var(--bg-soft); border:1px solid var(--line);
+      border-radius:6px; padding:2px 8px; font-size:9pt; color:var(--muted); }
+  .header-flex{ display:flex; justify-content:space-between; align-items:flex-start; }
+  .logo{ height:40px; }
+</style>
+</head>
+<body>
+<div class="brandbar"></div>
+<div class="header-flex" style="margin-top:20px">
+  <div>
+    <img class="logo" src="data:image/png;base64,{{LOGO_B64}}" alt="{{AGENCY_NAME}}">
+    <h1>Invoice</h1>
+    <div class="muted small">{{AGENCY_NAME}} · {{AGENCY_ADDRESS}}<br>
+      USt-IdNr: {{AGENCY_VAT_ID}} · {{AGENCY_EMAIL}}</div>
+  </div>
+  <div class="right small">
+    <div class="badge">No. {{INVOICE_NUMBER}}</div><br><br>
+    <strong>Issued:</strong> {{ISSUE_DATE}}<br>
+    <strong>Due:</strong> {{DUE_DATE}} ({{PAYMENT_TERMS}})
+  </div>
+</div>
+<h2>Bill To</h2>
+<div>{{CLIENT_NAME}}<br><span class="muted">{{CLIENT_ADDRESS}}<br>{{CLIENT_VAT_ID}}</span></div>
+<h2>Services</h2>
+<table>
+  <thead>
+    <tr><th>Description</th><th class="right">Qty</th>
+        <th class="right">Unit (€)</th><th class="right">Amount (€)</th></tr>
+  </thead>
+  <tbody>{{LINE_ITEMS_ROWS}}</tbody>
+</table>
+<table class="totals" style="width:45%;margin-left:auto">
+  <tr><td>Subtotal</td><td class="right">€{{SUBTOTAL}}</td></tr>
+  <tr><td>VAT ({{VAT_RATE}}%)</td><td class="right">€{{VAT_AMOUNT}}</td></tr>
+  <tr><td class="grand">Total Due</td><td class="right grand">€{{TOTAL}}</td></tr>
+</table>
+<h2>Payment</h2>
+<div class="small">IBAN {{IBAN}} · BIC {{BIC}} · Ref: {{INVOICE_NUMBER}}<br>{{NOTES}}</div>
+<div class="small muted" style="margin-top:24px">{{LEGAL_FOOTER}}</div>
+</body>
+</html>

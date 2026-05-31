@@ -1,0 +1,221 @@
+{
+  "name": "Industry Radar -> Telegram",
+  "nodes": [
+    {
+      "id": "manual-trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -400,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "schedule-trigger",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -400,
+        180
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * 1-5"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "webhook-trigger",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -400,
+        360
+      ],
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "radar",
+        "responseMode": "lastNode",
+        "responseData": "firstEntryJson"
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "searxng-search",
+      "name": "SearXNG Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -160,
+        180
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "http://searxng:8080/search",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "AI agents OR n8n OR local LLM OR freelance developer"
+            },
+            {
+              "name": "format",
+              "value": "json"
+            },
+            {
+              "name": "time_range",
+              "value": "week"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3
+    },
+    {
+      "id": "build-prompt",
+      "name": "Build Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        80,
+        180
+      ],
+      "parameters": {
+        "jsCode": "const results = ($input.first().json.results || []).slice(0, 12);\nconst lines = results.map((r, i) => `${i + 1}. ${(r.title || '').trim()}\\n   ${(r.content || '').replace(/\\s+/g, ' ').trim()}\\n   ${(r.url || '').trim()}`).join('\\n\\n');\n\nconst persona = `You are Mira, a research analyst. You are rigorous, neutral, and never speculate without labeling it. Work only from the provided search results / retrieved documents. For every factual claim include a [source: URL or doc title]. Explicitly separate Facts (in sources), Inference (your reasoning), and Unknown (not in sources — say so). State a confidence level (high/medium/low) for conclusions. Never invent a source or a statistic. Prefer recent sources and note publication dates. Output structured markdown: a 2-line summary, then findings as bullets, then a Sources list.`;\n\nconst task = `Below are the top web search results from the last week about AI agents, n8n, local LLMs, and freelance development. Write a SHORT plain-text Telegram digest (this goes straight into a Telegram message, so NO markdown, NO asterisks, NO link formatting — plain text only).\\n\\nFormat exactly:\\n- First line: a header like \\\"📡 Industry Radar — <weekday date>\\\".\\n- Then 5 to 7 bullet lines, each starting with \\\"• \\\", each one notable item from the results (what happened + why it matters, one tight sentence). Add the source domain in parentheses where useful.\\n- Then one final line starting with \\\"Watch: \\\" naming the single thing most worth tracking next.\\n\\nRules: Use ONLY information present in the results below — do not invent anything; if the results are thin, say so plainly. Keep the whole message under 3000 characters. No preamble, no closing remarks — output only the digest.\\n\\nSEARCH RESULTS:\\n${lines || '(no results returned)'}`;\n\nconst output = { model: 'qwen3:8b', prompt: persona + '\\n\\n' + task, resultCount: results.length };\nreturn [{ json: output }];"
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "llm-request",
+      "name": "LLM (qwen3:8b)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        300,
+        180
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/generate",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $json.model, prompt: $json.prompt, stream:false, think:false, options:{ num_ctx:8192, temperature:0.3 } }) }}",
+        "options": {
+          "timeout": 300000
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3
+    },
+    {
+      "id": "telegram-send",
+      "name": "Telegram Send",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        520,
+        180
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "1816786906",
+        "text": "={{ $json.response.slice(0,4000) }}",
+        "additionalFields": {}
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "DBYRKqKOi8hDiJvp",
+          "name": "Telegram bot"
+        }
+      },
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "SearXNG Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "SearXNG Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "SearXNG Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SearXNG Search": {
+      "main": [
+        [
+          {
+            "node": "Build Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Prompt": {
+      "main": [
+        [
+          {
+            "node": "LLM (qwen3:8b)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM (qwen3:8b)": {
+      "main": [
+        [
+          {
+            "node": "Telegram Send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

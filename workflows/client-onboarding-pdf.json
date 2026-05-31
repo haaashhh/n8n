@@ -1,0 +1,315 @@
+{
+  "name": "Client Onboarding Packet -> PDF -> Telegram",
+  "nodes": [
+    {
+      "id": "trg_manual",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -640,
+        100
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "trg_exec",
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -640,
+        320
+      ],
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "clientName",
+              "type": "string"
+            },
+            {
+              "name": "projectName",
+              "type": "string"
+            },
+            {
+              "name": "startDate",
+              "type": "string"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "trg_webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -640,
+        540
+      ],
+      "webhookId": "onboarding-packet-webhook",
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "onboarding",
+        "responseMode": "lastNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "node_normalize",
+      "name": "Normalize Inputs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -380,
+        320
+      ],
+      "parameters": {
+        "jsLanguage": "javaScript",
+        "jsCode": "// Pull onboarding inputs from whichever trigger fired.\n// Webhook puts params under $json.query; Execute Workflow Trigger and Manual put them at top level.\nconst src = $input.first().json || {};\nconst q = src.query || {};\nconst pick = (k) => (src[k] !== undefined && src[k] !== '' ? src[k] : (q[k] !== undefined && q[k] !== '' ? q[k] : ''));\n\nconst clientName = String(pick('clientName') || 'Valued Client').trim();\nconst projectName = String(pick('projectName') || 'Your Project').trim();\nconst startDate = String(pick('startDate') || '').trim();\n\nreturn [{ json: { clientName, projectName, startDate } }];"
+      }
+    },
+    {
+      "id": "node_build_prompt",
+      "name": "Build Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -160,
+        320
+      ],
+      "parameters": {
+        "jsLanguage": "javaScript",
+        "jsCode": "// Vera (client concierge) writes a warm onboarding packet.\nconst { clientName, projectName, startDate } = $json;\n\nconst system = `You are Vera, the client concierge for a solo software agency based in Berlin. You write all client-facing communication. Voice: warm, calm, professional, concrete. Plain language — never jargon, never hype. At most one exclamation mark per message. Every message ends with exactly one clear next step or question. Mirror the client's language (German or English) and formality; in German default to \"Sie\" unless the client used \"du\". Never invent prices, deadlines, scope, or commitments — if a fact is missing, insert a literal [PLACEHOLDER: what's needed] and flag it. Never apologize more than once. Sign off as the agency owner, not as an AI. Output only the message body unless asked otherwise.`;\n\nconst task = `Write a warm client onboarding packet for the client below. Respond in ENGLISH.\\n\\nClient: ${clientName}\\nProject: ${projectName}\\nStart / kickoff date: ${startDate || '[PLACEHOLDER: kickoff date not provided]'}\\n\\nReturn ONLY a single valid JSON object (no markdown, no code fences, no prose before or after) with EXACTLY these keys:\\n{\\n  \"welcome\": \"2-3 warm sentences welcoming ${clientName} to the project. Address the client by name.\",\\n  \"steps\": [\"4 short timeline items describing what happens next, in order (e.g. kickoff call, discovery, first milestone, review). Each item is one short sentence.\"],\\n  \"checklist\": [\"4 short items describing what we need FROM the client to start (assets, access, decisions). Each one short line.\"],\\n  \"comms_policy\": \"2 sentences on how we communicate (channels, response times, weekly update cadence). Use [PLACEHOLDER: ...] for any specific detail you do not have.\",\\n  \"tools\": \"a short comma-separated list of tools we'll use together (e.g. email, shared drive, project board)\"\\n}\\nDo not invent dates or prices. If the kickoff date is missing, do not guess one. Keep every string concise and client-ready.`;\n\nreturn [{ json: { model: 'qwen3:8b', prompt: system + '\\n\\n' + task, clientName, projectName, startDate } }];"
+      }
+    },
+    {
+      "id": "node_llm",
+      "name": "LLM (Ollama qwen3:8b)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        60,
+        320
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/generate",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $json.model, prompt: $json.prompt, stream:false, think:false, options:{ num_ctx:8192, temperature:0.3 } }) }}",
+        "options": {
+          "timeout": 300000
+        }
+      }
+    },
+    {
+      "id": "node_build_html",
+      "name": "Build HTML",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        280,
+        320
+      ],
+      "parameters": {
+        "jsLanguage": "javaScript",
+        "jsCode": "// Fill templates/onboarding.html (inlined) with the model's JSON output.\nconst TEMPLATE = \"<!DOCTYPE html>\\n<html>\\n<head>\\n<meta charset=\\\"utf-8\\\">\\n<style>\\n  :root{\\n    --brand:#1F3A5F; --accent:#3E7CB1; --ink:#1A1A1A; --muted:#6B7280;\\n    --line:#E5E7EB; --bg-soft:#F7F9FC; --font:'Helvetica Neue',Arial,sans-serif;\\n  }\\n  @page{ size:A4; margin:18mm 16mm; }\\n  *{ box-sizing:border-box; -webkit-print-color-adjust:exact; print-color-adjust:exact; }\\n  body{ font-family:var(--font); color:var(--ink); font-size:11pt; line-height:1.5; margin:0; }\\n  h1{ color:var(--brand); font-size:22pt; margin:0 0 4px; }\\n  h2{ color:var(--brand); font-size:13pt; border-bottom:2px solid var(--accent);\\n      padding-bottom:4px; margin:24px 0 10px; }\\n  .muted{ color:var(--muted); } .small{ font-size:9pt; }\\n  .brandbar{ height:6px; background:linear-gradient(90deg,var(--brand),var(--accent)); }\\n  table{ width:100%; border-collapse:collapse; margin:8px 0; }\\n  td{ padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }\\n  tr:nth-child(even) td{ background:var(--bg-soft); }\\n  .logo{ height:40px; }\\n</style>\\n</head>\\n<body>\\n<div class=\\\"brandbar\\\"></div>\\n<div style=\\\"margin-top:50px\\\">\\n  <img class=\\\"logo\\\" src=\\\"data:image/png;base64,{{LOGO_B64}}\\\" alt=\\\"{{AGENCY_NAME}}\\\">\\n  <h1>Welcome aboard, {{CLIENT_FIRST_NAME}}</h1>\\n  <p class=\\\"muted\\\">Your onboarding guide with {{AGENCY_NAME}}</p>\\n</div>\\n<h2>What happens next</h2>\\n{{STEPS_LIST}}\\n<h2>Your project at a glance</h2>\\n<table>\\n  <tbody>\\n    <tr><td><strong>Project</strong></td><td>{{PROJECT_NAME}}</td></tr>\\n    <tr><td><strong>Main contact</strong></td><td>{{CONTACT_NAME}} — {{CONTACT_EMAIL}}</td></tr>\\n    <tr><td><strong>Kickoff</strong></td><td>{{KICKOFF_DATE}}</td></tr>\\n    <tr><td><strong>Tools we'll use</strong></td><td>{{TOOLS}}</td></tr>\\n  </tbody>\\n</table>\\n<h2>What we need from you</h2>\\n{{CHECKLIST}}\\n<h2>How we communicate</h2>\\n<p>{{COMMS_POLICY}}</p>\\n<div class=\\\"small muted\\\" style=\\\"margin-top:30px\\\">Questions? {{AGENCY_EMAIL}}</div>\\n</body>\\n</html>\\n\";\n\n// ---- Agency constants (edit to your real branding) ----\nconst AGENCY_NAME = 'Your Agency';\nconst AGENCY_EMAIL = 'achrafrachek1@gmail.com';\nconst CONTACT_NAME = 'Achraf Rachek';\nconst CONTACT_EMAIL = 'achrafrachek1@gmail.com';\nconst LOGO_B64 = '';\n\nconst esc = (s) => String(s == null ? '' : s)\n  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')\n  .replace(/\\\"/g, '&quot;');\n\n// Pull the raw model text, then try to parse the JSON it returned.\nconst raw = String($json.response || '');\nlet data = {};\ntry {\n  const m = raw.match(/\\{[\\s\\S]*\\}/);\n  data = JSON.parse(m ? m[0] : raw);\n} catch (e) {\n  data = {};\n}\n\nconst clientName = $('Build Prompt').first().json.clientName || 'Valued Client';\nconst projectName = $('Build Prompt').first().json.projectName || 'Your Project';\nconst startDate = $('Build Prompt').first().json.startDate || '[PLACEHOLDER: kickoff date]';\nconst firstName = clientName.split(' ')[0] || clientName;\n\nconst welcome = data.welcome ? `<p>${esc(data.welcome)}</p>` : '';\nconst commsPolicy = esc(data.comms_policy || '[PLACEHOLDER: communication policy]');\nconst tools = esc(data.tools || 'email, shared drive, project board');\n\nconst toList = (arr, ordered) => {\n  const items = Array.isArray(arr) ? arr : [];\n  if (!items.length) return '<p class=\\\"muted\\\">[PLACEHOLDER: details to follow]</p>';\n  const lis = items.map((x) => `<li>${esc(x)}</li>`).join('');\n  return ordered ? `<ol>${lis}</ol>` : `<ul>${lis}</ul>`;\n};\n\nconst stepsList = welcome + toList(data.steps, true);\nconst checklist = toList(data.checklist, false);\n\nconst html = TEMPLATE\n  .replace(/\\{\\{LOGO_B64\\}\\}/g, LOGO_B64)\n  .replace(/\\{\\{AGENCY_NAME\\}\\}/g, esc(AGENCY_NAME))\n  .replace(/\\{\\{CLIENT_FIRST_NAME\\}\\}/g, esc(firstName))\n  .replace(/\\{\\{STEPS_LIST\\}\\}/g, stepsList)\n  .replace(/\\{\\{PROJECT_NAME\\}\\}/g, esc(projectName))\n  .replace(/\\{\\{CONTACT_NAME\\}\\}/g, esc(CONTACT_NAME))\n  .replace(/\\{\\{CONTACT_EMAIL\\}\\}/g, esc(CONTACT_EMAIL))\n  .replace(/\\{\\{KICKOFF_DATE\\}\\}/g, esc(startDate))\n  .replace(/\\{\\{TOOLS\\}\\}/g, tools)\n  .replace(/\\{\\{CHECKLIST\\}\\}/g, checklist)\n  .replace(/\\{\\{COMMS_POLICY\\}\\}/g, commsPolicy)\n  .replace(/\\{\\{AGENCY_EMAIL\\}\\}/g, esc(AGENCY_EMAIL));\n\nconst safeClient = clientName.replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '') || 'client';\nreturn [{ json: { html, fileName: `onboarding-${safeClient}.pdf` } }];"
+      }
+    },
+    {
+      "id": "node_to_file",
+      "name": "HTML to File",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        500,
+        320
+      ],
+      "parameters": {
+        "operation": "toText",
+        "sourceProperty": "html",
+        "binaryPropertyName": "index",
+        "options": {
+          "fileName": "index.html"
+        }
+      }
+    },
+    {
+      "id": "node_gotenberg",
+      "name": "Gotenberg (HTML to PDF)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        720,
+        320
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "http://gotenberg:3000/forms/chromium/convert/html",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "files",
+              "inputDataFieldName": "index"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 300000,
+          "response": {
+            "response": {
+              "responseFormat": "file",
+              "outputPropertyName": "data"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "node_telegram",
+      "name": "Telegram sendDocument",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        940,
+        320
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "sendDocument",
+        "chatId": "1816786906",
+        "binaryData": true,
+        "binaryPropertyName": "data",
+        "additionalFields": {
+          "fileName": "={{ $('Build HTML').first().json.fileName }}",
+          "caption": "=Onboarding packet for {{ $('Build Prompt').first().json.clientName }} — {{ $('Build Prompt').first().json.projectName }}"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "DBYRKqKOi8hDiJvp",
+          "name": "Telegram bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Normalize Inputs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Workflow Trigger": {
+      "main": [
+        [
+          {
+            "node": "Normalize Inputs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize Inputs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Inputs": {
+      "main": [
+        [
+          {
+            "node": "Build Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Prompt": {
+      "main": [
+        [
+          {
+            "node": "LLM (Ollama qwen3:8b)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM (Ollama qwen3:8b)": {
+      "main": [
+        [
+          {
+            "node": "Build HTML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build HTML": {
+      "main": [
+        [
+          {
+            "node": "HTML to File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTML to File": {
+      "main": [
+        [
+          {
+            "node": "Gotenberg (HTML to PDF)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gotenberg (HTML to PDF)": {
+      "main": [
+        [
+          {
+            "node": "Telegram sendDocument",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

@@ -1,0 +1,266 @@
+{
+  "name": "RAG — Ingest & Query",
+  "nodes": [
+    {
+      "id": "manual_trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -400,
+        80
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "webhook_trigger",
+      "name": "Webhook (GET /ask)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -400,
+        300
+      ],
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "ask",
+        "responseMode": "lastNode",
+        "responseData": "firstEntryJson",
+        "options": {}
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "read_question",
+      "name": "Read Question",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -160,
+        190
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Pull the question from webhook ?q= or use a manual default.\nconst item = $input.first() ? $input.first().json : {};\nconst q = (item.query && item.query.q) || item.q || item.question || 'What does the runbook say about restoring n8n from backup?';\nreturn [{ json: { question: String(q).trim(), top_k: 5 } }];"
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "embed_question",
+      "name": "Embed Question (Ollama)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        80,
+        190
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/embeddings",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'qwen3-embedding:0.6b', prompt: $json.question }) }}",
+        "options": {
+          "timeout": 300000
+        }
+      },
+      "onError": "stopWorkflow",
+      "retryOnFail": true,
+      "maxTries": 3
+    },
+    {
+      "id": "format_vector",
+      "name": "Format Vector",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        300,
+        190
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Ollama /api/embeddings returns { embedding: [...] }.\nconst emb = $input.first().json.embedding;\nif (!Array.isArray(emb)) {\n  throw new Error('No embedding returned from Ollama: ' + JSON.stringify($input.first().json).slice(0,200));\n}\nconst vectorLiteral = '[' + emb.join(',') + ']';\nconst question = $('Read Question').first().json.question;\nconst top_k = $('Read Question').first().json.top_k || 5;\nreturn [{ json: { question: question, top_k: top_k, vectorLiteral: vectorLiteral, dim: emb.length } }];"
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "vector_search",
+      "name": "Vector Search (pgvector)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        520,
+        190
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT text, metadata, 1 - (embedding <=> $1::vector) AS score\nFROM documents\nORDER BY embedding <=> $1::vector\nLIMIT $2;",
+        "options": {
+          "queryReplacement": "={{ $json.vectorLiteral }},={{ $json.top_k }}"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3
+    },
+    {
+      "id": "assemble_context",
+      "name": "Assemble Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        740,
+        190
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const question = $('Format Vector').first().json.question;\nconst rows = $input.all().map(i => i.json).filter(r => r && r.text);\nconst parts = [];\nfor (let i = 0; i < rows.length; i++) {\n  const r = rows[i];\n  const src = (r.metadata && (r.metadata.source || r.metadata.title)) || ('doc#' + (i+1));\n  parts.push('[' + (i+1) + '] (source: ' + src + ')\\n' + r.text);\n}\nconst context = rows.length === 0 ? '(no matching documents found in the knowledge base)' : parts.join('\\n\\n');\nconst system = \"You are Ada, the ops/engineer for a solo agency's local automation stack (Docker n8n, Ollama on host, Postgres+pgvector, localhost-only, MacBook M3 Pro 38GB, RAM-tight). Be terse and technical — no preamble, no encouragement. Give the command, code (in fenced blocks), or diff first, then at most one line of why. State assumptions explicitly. Flag anything destructive, anything that exposes a port to the LAN, anything that loads two large models at once, or anything touching secrets. Prefer absolute paths. If unsure, say so in one line.\";\nconst prompt = system + '\\n\\nAnswer the question using ONLY the retrieved context below. Cite the bracketed source numbers you used, e.g. [1]. If the context does not contain the answer, say so in one line and do not invent facts.\\n\\n=== RETRIEVED CONTEXT ===\\n' + context + '\\n\\n=== QUESTION ===\\n' + question + '\\n\\n=== ANSWER ===';\nreturn [{ json: { model: 'qwen3:8b', prompt: prompt, question: question, matches: rows.length } }];"
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "llm_answer",
+      "name": "LLM Answer (Ollama)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        960,
+        190
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $json.model, prompt: $json.prompt, stream: false, think: false, options: { num_ctx: 8192, temperature: 0.3 } }) }}",
+        "options": {
+          "timeout": 300000
+        }
+      },
+      "onError": "stopWorkflow",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "telegram_send",
+      "name": "Telegram Answer",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1180,
+        190
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "1816786906",
+        "text": "={{ $json.response.slice(0,4000) }}",
+        "additionalFields": {}
+      },
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "telegramApi": {
+          "id": "DBYRKqKOi8hDiJvp",
+          "name": "Telegram bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read Question",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook (GET /ask)": {
+      "main": [
+        [
+          {
+            "node": "Read Question",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Question": {
+      "main": [
+        [
+          {
+            "node": "Embed Question (Ollama)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embed Question (Ollama)": {
+      "main": [
+        [
+          {
+            "node": "Format Vector",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Vector": {
+      "main": [
+        [
+          {
+            "node": "Vector Search (pgvector)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vector Search (pgvector)": {
+      "main": [
+        [
+          {
+            "node": "Assemble Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assemble Context": {
+      "main": [
+        [
+          {
+            "node": "LLM Answer (Ollama)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Answer (Ollama)": {
+      "main": [
+        [
+          {
+            "node": "Telegram Answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

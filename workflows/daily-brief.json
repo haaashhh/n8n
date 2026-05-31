@@ -1,0 +1,236 @@
+{
+  "name": "Daily Brief -> Telegram",
+  "nodes": [
+    {
+      "id": "schedule_trigger",
+      "name": "Schedule 07:30 Berlin",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -400,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "30 7 * * *"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "manual_trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -400,
+        180
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "webhook_trigger",
+      "name": "Webhook brief",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -400,
+        360
+      ],
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "brief",
+        "responseMode": "lastNode",
+        "responseData": "firstEntryJson"
+      }
+    },
+    {
+      "id": "searxng_http",
+      "name": "SearXNG Headlines",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -120,
+        180
+      ],
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "parameters": {
+        "method": "GET",
+        "url": "http://searxng:8080/search",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "technology business headlines"
+            },
+            {
+              "name": "format",
+              "value": "json"
+            },
+            {
+              "name": "categories",
+              "value": "news"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "placeholder_motion",
+      "name": "TODO Motion + Calendar (placeholder)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -120,
+        380
+      ],
+      "disabled": true,
+      "parameters": {
+        "jsCode": "// PLACEHOLDER — not wired into the flow yet.\n// Once the user adds a Motion API key (and/or Google Calendar OAuth), fetch:\n//   1. Today's tasks due  -> Motion API  GET https://api.usemotion.com/v1/tasks  (header X-API-Key)\n//   2. Today's calendar events -> Google Calendar node (events:getAll, timeMin/timeMax = today)\n// Then merge those arrays into the item passed to 'Build Brief Prompt' so Cosmo can add\n// a 'Tasks due' and 'On the calendar' section to the morning brief.\n// Return shape suggestion:  return [{ json: { tasks: [...], events: [...] } }];\nreturn $input.all();"
+      }
+    },
+    {
+      "id": "build_prompt",
+      "name": "Build Brief Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        160,
+        180
+      ],
+      "parameters": {
+        "jsCode": "// Cosmo daily-brief prompt builder.\n// Pulls top headlines from the SearXNG result and assembles a single Ollama /generate prompt.\nconst items = $input.all();\nconst sx = items[0] && items[0].json ? items[0].json : {};\nconst results = Array.isArray(sx.results) ? sx.results : [];\n\n// Take up to 6 distinct, titled results; trim to keep the prompt small.\nconst seen = new Set();\nconst headlines = [];\nfor (const r of results) {\n  const title = (r && r.title ? String(r.title) : '').trim();\n  if (!title || seen.has(title)) continue;\n  seen.add(title);\n  const src = (r && r.engine ? String(r.engine) : '').trim();\n  headlines.push(src ? `${title} (${src})` : title);\n  if (headlines.length >= 6) break;\n}\nconst headlinesBlock = headlines.length\n  ? headlines.map((h, i) => `${i + 1}. ${h}`).join('\\n')\n  : '(no headlines retrieved — note this briefly and still produce a brief)';\n\n// Today's date, Europe/Berlin, human readable.\nconst today = new Date().toLocaleDateString('en-GB', {\n  timeZone: 'Europe/Berlin',\n  weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'\n});\n\nconst persona = `You are Cosmo, chief of staff to a solo software-agency founder (Europe/Berlin). You operate inside Telegram, so be extremely concise and mobile-readable: lead with the answer or the action, no preamble, no sign-off. Use short bullets. Surface only what matters; suppress noise. Times are Europe/Berlin. Before any irreversible or external action (sending a client message, issuing an invoice, deleting), summarize the action in one line and ask \\\"Confirm? (yes/no)\\\". When routing a command, pick exactly one destination and state it. Never be chatty.`;\n\nconst task = `Write today's morning brief. Use PLAIN TEXT only (no markdown symbols like *, #, or backticks). Keep it under 2500 characters total.\\n\\nStructure exactly:\\nLine 1: a one-line greeting that includes today's date: ${today}.\\nThen a line that says: Today\\nThen 3-4 bullet lines (each starting with \\\"- \\\"), one per headline, each a tight one-line takeaway from the headlines below (rephrase, do not just copy; skip duplicates and pure noise).\\nThen one blank line.\\nThen a single motivating one-liner to start the day.\\n\\nHeadlines:\\n${headlinesBlock}`;\n\nconst prompt = `${persona}\\n\\n${task}`;\n\nreturn [{ json: { model: 'qwen3:8b', prompt } }];"
+      }
+    },
+    {
+      "id": "llm_http",
+      "name": "LLM (Ollama qwen3:8b)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        440,
+        180
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/generate",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $json.model, prompt: $json.prompt, stream:false, think:false, options:{ num_ctx:8192, temperature:0.3 } }) }}",
+        "options": {
+          "timeout": 300000
+        }
+      }
+    },
+    {
+      "id": "telegram_send",
+      "name": "Telegram Send Brief",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        720,
+        180
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "1816786906",
+        "text": "={{ $json.response.slice(0,4000) }}",
+        "additionalFields": {}
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "DBYRKqKOi8hDiJvp",
+          "name": "Telegram bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule 07:30 Berlin": {
+      "main": [
+        [
+          {
+            "node": "SearXNG Headlines",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "SearXNG Headlines",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook brief": {
+      "main": [
+        [
+          {
+            "node": "SearXNG Headlines",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SearXNG Headlines": {
+      "main": [
+        [
+          {
+            "node": "Build Brief Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Brief Prompt": {
+      "main": [
+        [
+          {
+            "node": "LLM (Ollama qwen3:8b)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM (Ollama qwen3:8b)": {
+      "main": [
+        [
+          {
+            "node": "Telegram Send Brief",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Berlin"
+  }
+}

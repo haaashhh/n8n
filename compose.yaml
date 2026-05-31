@@ -73,3 +73,8 @@ services:
       - ./searxng:/etc/searxng
     environment:
       SEARXNG_BASE_URL: http://localhost:8080/
+
+  # Local HTML->PDF (headless Chromium). Reachable from the n8n container at http://gotenberg:3000.
+  gotenberg:
+    image: gotenberg/gotenberg:8
+    restart: unless-stopped

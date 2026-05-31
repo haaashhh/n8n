@@ -1,0 +1,253 @@
+{
+  "name": "Invoice -> PDF -> Telegram (Klaus)",
+  "nodes": [
+    {
+      "id": "manual-trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -640,
+        -160
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "execute-workflow-trigger",
+      "name": "When Executed by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -640,
+        40
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "webhook-trigger",
+      "name": "Webhook (test)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -640,
+        260
+      ],
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "invoice",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "compute-totals",
+      "name": "Compute Totals",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -360,
+        40
+      ],
+      "parameters": {
+        "jsMode": "runOnceForEachItem",
+        "language": "javaScript",
+        "jsCode": "// Klaus — finance: deterministic invoice math. NO LLM does the numbers.\n// German conventions: Rechnungsnummer, net-14 default, USt/VAT 19% default,\n// §19 Kleinunternehmer option (omits VAT row).\n\nconst src = $json.body && Object.keys($json.body).length ? $json.body : $json;\n\n// ---- de-EUR number formatting (1.234,56) ----\nconst eur = (n) => Number(n).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });\n\n// ---- inputs (with safe demo defaults so the GET webhook works for testing) ----\nconst clientName = src.clientName || 'Beispiel GmbH';\nconst invoiceNo  = src.invoiceNo  || 'DRAFT-0001';\nconst dueDate    = src.dueDate    || null;\n\nlet lineItems = src.lineItems;\nif (typeof lineItems === 'string') { try { lineItems = JSON.parse(lineItems); } catch (e) { lineItems = null; } }\nif (!Array.isArray(lineItems) || lineItems.length === 0) {\n  lineItems = [\n    { desc: 'Web development (Sprint 1)', qty: 1, unitPrice: 2400 },\n    { desc: 'UX consulting',               qty: 6, unitPrice: 120 }\n  ];\n}\n\n// ---- tax config ----\nconst kleinunternehmer = src.kleinunternehmer === true || src.kleinunternehmer === 'true';\nconst vatRate = kleinunternehmer ? 0 : (src.vatRate != null ? Number(src.vatRate) : 19);\n\n// ---- dates (Europe/Berlin), net-14 default ----\nconst today = new Date();\nconst fmtDate = (d) => d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'Europe/Berlin' });\nconst issueDate = fmtDate(today);\nlet dueStr;\nif (dueDate) { const d = new Date(dueDate); dueStr = isNaN(d) ? String(dueDate) : fmtDate(d); }\nelse { const d = new Date(today.getTime()); d.setDate(d.getDate() + 14); dueStr = fmtDate(d); }\n\n// ---- math (round per line, then sum) ----\nlet subtotal = 0;\nconst rows = lineItems.map((it) => {\n  const qty = Number(it.qty) || 0;\n  const unit = Number(it.unitPrice) || 0;\n  const amount = Math.round(qty * unit * 100) / 100;\n  subtotal += amount;\n  return { desc: String(it.desc || ''), qty, unit, amount };\n});\nsubtotal = Math.round(subtotal * 100) / 100;\nconst vatAmount = Math.round(subtotal * (vatRate / 100) * 100) / 100;\nconst total = Math.round((subtotal + vatAmount) * 100) / 100;\n\nreturn [{ json: {\n  clientName,\n  invoiceNo,\n  issueDate,\n  dueStr,\n  paymentTerms: 'Zahlbar innerhalb von 14 Tagen netto',\n  kleinunternehmer,\n  vatRate,\n  rows,\n  subtotal,\n  vatAmount,\n  total,\n  subtotal_fmt: eur(subtotal),\n  vatAmount_fmt: eur(vatAmount),\n  total_fmt: eur(total)\n} }];\n"
+      }
+    },
+    {
+      "id": "build-html",
+      "name": "Build Invoice HTML",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -120,
+        40
+      ],
+      "parameters": {
+        "jsMode": "runOnceForEachItem",
+        "language": "javaScript",
+        "jsCode": "// Fill templates/invoice.html (embedded — n8n container cannot read the host FS).\n// German invoicing conventions per the client-invoice skill reference.\nconst d = $json;\nconst eur = (n) => Number(n).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });\nconst esc = (s) => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');\n\n// ---- agency constants (placeholders until a real source/Postgres exists) ----\nconst AGENCY_NAME    = 'Rachek Software';\nconst AGENCY_ADDRESS = 'Musterstraße 1, 10115 Berlin';\nconst AGENCY_VAT_ID  = 'DE000000000';\nconst AGENCY_EMAIL   = 'achrafrachek1@gmail.com';\nconst IBAN = 'DE00 0000 0000 0000 0000 00';\nconst BIC  = 'XXXXDEXX';\nconst LOGO_B64 = '';\n\n// ---- line-item rows ----\nconst rowsHtml = (d.rows || []).map(r =>\n  `<tr><td>${esc(r.desc)}</td><td class=\"right\">${r.qty}</td><td class=\"right\">${eur(r.unit)}</td><td class=\"right\">${eur(r.amount)}</td></tr>`\n).join('');\n\n// ---- VAT row + legal footer: §19 Kleinunternehmer omits VAT ----\nconst vatRowHtml = d.kleinunternehmer\n  ? ''\n  : `<tr><td>USt (${d.vatRate}%)</td><td class=\"right\">€${eur(d.vatAmount)}</td></tr>`;\nconst legalFooter = d.kleinunternehmer\n  ? `${AGENCY_NAME} · ${AGENCY_ADDRESS} · ${AGENCY_VAT_ID}. Gemäß § 19 UStG wird keine Umsatzsteuer berechnet.`\n  : `${AGENCY_NAME} · ${AGENCY_ADDRESS} · USt-IdNr ${AGENCY_VAT_ID}. ${d.paymentTerms}.`;\nconst notes = 'Vielen Dank für Ihren Auftrag.';\n\nconst html = `<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n<style>\n  :root{\n    --brand:#1F3A5F; --accent:#3E7CB1; --ink:#1A1A1A; --muted:#6B7280;\n    --line:#E5E7EB; --bg-soft:#F7F9FC; --font:'Helvetica Neue',Arial,sans-serif;\n  }\n  @page{ size:A4; margin:18mm 16mm; }\n  *{ box-sizing:border-box; -webkit-print-color-adjust:exact; print-color-adjust:exact; }\n  body{ font-family:var(--font); color:var(--ink); font-size:11pt; line-height:1.5; margin:0; }\n  h1{ color:var(--brand); font-size:22pt; margin:0 0 4px; }\n  h2{ color:var(--brand); font-size:13pt; border-bottom:2px solid var(--accent);\n      padding-bottom:4px; margin:24px 0 10px; }\n  .muted{ color:var(--muted); } .right{ text-align:right; } .small{ font-size:9pt; }\n  .brandbar{ height:6px; background:linear-gradient(90deg,var(--brand),var(--accent)); }\n  table{ width:100%; border-collapse:collapse; margin:8px 0; }\n  th{ background:var(--brand); color:#fff; text-align:left; padding:8px 10px; font-size:9.5pt;\n      text-transform:uppercase; letter-spacing:.04em; }\n  td{ padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }\n  tr:nth-child(even) td{ background:var(--bg-soft); }\n  .totals td{ border:none; padding:4px 10px; }\n  .totals .grand{ font-size:13pt; font-weight:700; color:var(--brand);\n      border-top:2px solid var(--brand); }\n  .badge{ display:inline-block; background:var(--bg-soft); border:1px solid var(--line);\n      border-radius:6px; padding:2px 8px; font-size:9pt; color:var(--muted); }\n  .header-flex{ display:flex; justify-content:space-between; align-items:flex-start; }\n  .logo{ height:40px; }\n</style>\n</head>\n<body>\n<div class=\"brandbar\"></div>\n<div class=\"header-flex\" style=\"margin-top:20px\">\n  <div>\n    <h1>Rechnung</h1>\n    <div class=\"muted small\">${esc(AGENCY_NAME)} · ${esc(AGENCY_ADDRESS)}<br>\n      USt-IdNr: ${esc(AGENCY_VAT_ID)} · ${esc(AGENCY_EMAIL)}</div>\n  </div>\n  <div class=\"right small\">\n    <div class=\"badge\">Rechnungsnr. ${esc(d.invoiceNo)}</div><br><br>\n    <strong>Datum:</strong> ${esc(d.issueDate)}<br>\n    <strong>Fällig:</strong> ${esc(d.dueStr)}\n  </div>\n</div>\n<h2>Rechnung an</h2>\n<div>${esc(d.clientName)}</div>\n<h2>Leistungen</h2>\n<table>\n  <thead>\n    <tr><th>Beschreibung</th><th class=\"right\">Menge</th>\n        <th class=\"right\">Einzel (€)</th><th class=\"right\">Betrag (€)</th></tr>\n  </thead>\n  <tbody>${rowsHtml}</tbody>\n</table>\n<table class=\"totals\" style=\"width:45%;margin-left:auto\">\n  <tr><td>Zwischensumme</td><td class=\"right\">€${eur(d.subtotal)}</td></tr>\n  ${vatRowHtml}\n  <tr><td class=\"grand\">Gesamtbetrag</td><td class=\"right grand\">€${eur(d.total)}</td></tr>\n</table>\n<h2>Zahlung</h2>\n<div class=\"small\">IBAN ${esc(IBAN)} · BIC ${esc(BIC)} · Verwendungszweck: ${esc(d.invoiceNo)}<br>${esc(d.paymentTerms)}.<br>${esc(notes)}</div>\n<div class=\"small muted\" style=\"margin-top:24px\">${esc(legalFooter)}</div>\n</body>\n</html>`;\n\nreturn [{ json: { html, invoiceNo: d.invoiceNo, clientName: d.clientName, total_fmt: d.total_fmt } }];\n"
+      }
+    },
+    {
+      "id": "convert-to-file",
+      "name": "HTML to File",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        120,
+        40
+      ],
+      "parameters": {
+        "operation": "toText",
+        "sourceProperty": "html",
+        "binaryPropertyName": "index",
+        "options": {
+          "fileName": "index.html",
+          "mimeType": "text/html"
+        }
+      }
+    },
+    {
+      "id": "gotenberg",
+      "name": "Gotenberg HTML to PDF",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        360,
+        40
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://gotenberg:3000/forms/chromium/convert/html",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "files",
+              "inputDataFieldName": "index"
+            },
+            {
+              "parameterType": "formData",
+              "name": "paperWidth",
+              "value": "8.27"
+            },
+            {
+              "parameterType": "formData",
+              "name": "paperHeight",
+              "value": "11.69"
+            },
+            {
+              "parameterType": "formData",
+              "name": "printBackground",
+              "value": "true"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 120000,
+          "response": {
+            "response": {
+              "responseFormat": "file",
+              "outputPropertyName": "data"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "telegram-send",
+      "name": "Telegram sendDocument",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        600,
+        40
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "sendDocument",
+        "chatId": "1816786906",
+        "binaryData": true,
+        "binaryPropertyName": "data",
+        "additionalFields": {
+          "fileName": "={{ 'Rechnung-' + $('Build Invoice HTML').item.json.invoiceNo + '.pdf' }}",
+          "caption": "={{ 'Invoice ' + $('Build Invoice HTML').item.json.invoiceNo + ' — ' + $('Build Invoice HTML').item.json.clientName }}"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "DBYRKqKOi8hDiJvp",
+          "name": "Telegram bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Compute Totals",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Compute Totals",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook (test)": {
+      "main": [
+        [
+          {
+            "node": "Compute Totals",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute Totals": {
+      "main": [
+        [
+          {
+            "node": "Build Invoice HTML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Invoice HTML": {
+      "main": [
+        [
+          {
+            "node": "HTML to File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTML to File": {
+      "main": [
+        [
+          {
+            "node": "Gotenberg HTML to PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gotenberg HTML to PDF": {
+      "main": [
+        [
+          {
+            "node": "Telegram sendDocument",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
