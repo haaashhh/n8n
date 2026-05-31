@@ -1,0 +1,12 @@
+{
+  "slug": "{{SLUG}}",
+  "name": "{{CLIENT_NAME}}",
+  "status": "lead",
+  "default_persona": "vera",
+  "language": "en",
+  "formality": "neutral",
+  "contacts": [{"name": "", "role": "", "email": "", "primary": true}],
+  "billing": {"day_rate": 0, "currency": "EUR", "terms": "net-14", "vat": 0.19, "invoice_prefix": "{{PREFIX}}-2026-"},
+  "brand": {"primary": "#0B5C3F", "accent": "#C9A227", "ink": "#111111", "logo": "brand/logo.svg"},
+  "project": {"name": "", "phase": 1, "budget_cap": 0, "deadline": ""}
+}

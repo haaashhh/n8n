@@ -1,0 +1,5 @@
+{
+  "clients": [
+    { "slug": "acme-gmbh", "name": "Acme GmbH", "status": "active", "default_persona": "vera" }
+  ]
+}

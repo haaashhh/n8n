@@ -16,3 +16,10 @@ searxng/settings.yml
 # macOS / editor cruft
 .DS_Store
 *.log
+
+# Client data — confidential; repo is public. Commit only the template + structure.
+clients/*
+!clients/README.md
+!clients/_registry.example.json
+!clients/_TEMPLATE/
+!clients/_TEMPLATE/**
